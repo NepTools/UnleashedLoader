@@ -41,7 +41,7 @@ namespace
 			fileNameLower == "preview.png";
 	}
 
-	void ScanModFolder(const std::string &modRoot, const std::string &dir, int depth)
+	void ScanModFolder(const std::string &modRoot, const std::string &dir, int depth, const std::string &extraExcludeLower)
 	{
 		WIN32_FIND_DATAA fd;
 		std::string pattern = dir + "\\*";
@@ -59,7 +59,7 @@ namespace
 
 			if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
 			{
-				ScanModFolder(modRoot, full, depth + 1);
+				ScanModFolder(modRoot, full, depth + 1, extraExcludeLower);
 				continue;
 			}
 
@@ -68,7 +68,7 @@ namespace
 				std::string lower = name;
 				for (char &c : lower)
 					c = (char)tolower((unsigned char)c);
-				if (IsReservedModFile(lower))
+				if (IsReservedModFile(lower) || (!extraExcludeLower.empty() && lower == extraExcludeLower))
 					continue;
 			}
 
@@ -77,6 +77,36 @@ namespace
 		} while (FindNextFileA(hFind, &fd));
 
 		FindClose(hFind);
+	}
+
+	typedef void(__cdecl *NepModInit_t)();
+
+	void LoadModDll(const std::string &modRoot, const std::string &dllFile, const std::string &name)
+	{
+		std::string dllPath = modRoot + "\\" + dllFile;
+		if (!FileExists(dllPath))
+		{
+			Log::Write("[ModManager] '%s': DLLFile '%s' not found", name.c_str(), dllFile.c_str());
+			return;
+		}
+
+		HMODULE hMod = LoadLibraryA(dllPath.c_str());
+		if (!hMod)
+		{
+			Log::Write("[ModManager] '%s': failed to load %s, GetLastError=%lu",
+				name.c_str(), dllFile.c_str(), GetLastError());
+			return;
+		}
+
+		auto init = (NepModInit_t)GetProcAddress(hMod, "NepMod_Init");
+		if (!init)
+		{
+			Log::Write("[ModManager] '%s': %s loaded but has no NepMod_Init export", name.c_str(), dllFile.c_str());
+			return;
+		}
+
+		Log::Write("[ModManager] '%s': calling NepMod_Init in %s", name.c_str(), dllFile.c_str());
+		init();
 	}
 
 	void LoadMod(const std::string &modsDir, const std::string &folderName)
@@ -88,7 +118,7 @@ namespace
 			return;
 		}
 
-		std::string name = folderName, author, version;
+		std::string name = folderName, author, version, dllFile;
 		IniFile modIni;
 		if (modIni.Load(modRoot + "\\mod.ini"))
 		{
@@ -97,11 +127,16 @@ namespace
 				if (_stricmp(kv.first.c_str(), "Name") == 0) name = kv.second;
 				else if (_stricmp(kv.first.c_str(), "Author") == 0) author = kv.second;
 				else if (_stricmp(kv.first.c_str(), "Version") == 0) version = kv.second;
+				else if (_stricmp(kv.first.c_str(), "DLLFile") == 0) dllFile = kv.second;
 			}
 		}
 
+		std::string dllFileLower = dllFile;
+		for (char &c : dllFileLower)
+			c = (char)tolower((unsigned char)c);
+
 		size_t before = g_fileMap.Count();
-		ScanModFolder(modRoot, modRoot, 0);
+		ScanModFolder(modRoot, modRoot, 0, dllFileLower);
 		size_t added = g_fileMap.Count() - before;
 
 		Log::Write("[ModManager] Loaded '%s' (%s%s%s) - %zu file override(s)",
@@ -110,6 +145,9 @@ namespace
 			version.empty() ? "" : ", v",
 			version.c_str(),
 			added);
+
+		if (!dllFile.empty())
+			LoadModDll(modRoot, dllFile, name);
 	}
 }
 
